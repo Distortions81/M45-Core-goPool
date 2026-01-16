@@ -23,7 +23,7 @@ const (
 	defaultListenAddr    = ":3333"
 	defaultStatusAddr    = ":80"
 	defaultStatusTLSAddr = ":443"
-	defaultStatusTagline = "Solo Mining Pool"
+	defaultStatusTagline = "Solo Bitcoin Mining Pool"
 	defaultFiatCurrency  = "usd"
 	defaultGitHubURL     = "https://github.com/Distortions81/M45-Core-goPool/blob/main/README.md"
 	// StratumTLSListen is the default TLS listen address. Operators can disable
