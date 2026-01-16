@@ -104,8 +104,10 @@ const (
 	defaultHashrateEMAMinShares  = 10
 	minHashrateEMAMinShares      = 10
 
-	maxStratumMessageSize = 64 * 1024
-	stratumWriteTimeout   = 60 * time.Second
+	maxStratumMessageSize   = 64 * 1024
+	stratumReadBufferSize   = 8 * 1024 // Smaller buffer for typical messages; bufio grows if needed
+	stratumWriteTimeout     = 60 * time.Second
+	tcpKeepAlivePeriod      = 30 * time.Second // Detect dead connections faster than OS default
 	defaultVersionMask    = uint32(0x1fffe000)
 	minMinerTimeout       = 30 * time.Second
 	// initialReadTimeout limits how long we keep a connection around

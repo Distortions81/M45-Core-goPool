@@ -139,8 +139,27 @@ func (mc *MinerConn) handleSubmit(req *StratumRequest) {
 	if !ok {
 		return
 	}
-	ensureSubmissionWorkerPool()
-	submissionWorkers.submit(task)
+
+	// Optimistic mode: respond immediately, validate async. This minimizes
+	// displayed latency at the cost of not catching invalid shares until
+	// after the response. Invalid shares are still not counted.
+	if mc.cfg.OptimisticShareResponse {
+		mc.writeAcceptResponse(req.ID)
+		task.optimistic = true
+		ensureSubmissionWorkerPool()
+		submissionWorkers.submit(task)
+		return
+	}
+
+	// Sync mode processes shares directly in the read goroutine for lower
+	// latency. Async mode queues to the worker pool for better throughput
+	// under high load.
+	if mc.cfg.SyncShareProcessing {
+		mc.processSubmissionTask(task)
+	} else {
+		ensureSubmissionWorkerPool()
+		submissionWorkers.submit(task)
+	}
 }
 
 // prepareSubmissionTask validates a mining.submit request and, if valid, returns
@@ -345,6 +364,7 @@ func (mc *MinerConn) processSubmissionTask(task submissionTask) {
 	policyReject := task.policyReject
 	reqID := task.reqID
 	now := task.receivedAt
+	optimistic := task.optimistic // Response already sent in optimistic mode
 
 	if debugLogging || verboseLogging {
 		logger.Info("submit received",
@@ -449,11 +469,13 @@ func (mc *MinerConn) processSubmissionTask(task submissionTask) {
 		if err != nil {
 			logger.Error("submit header build error", "remote", mc.id, "error", err)
 			mc.recordShare(workerName, false, 0, 0, err.Error(), "", nil, now)
-			if banned, invalids := mc.noteInvalidSubmit(now, rejectInvalidCoinbase); banned {
-				mc.logBan(rejectInvalidCoinbase.String(), workerName, invalids)
-				mc.writeResponse(StratumResponse{ID: reqID, Result: false, Error: newStratumError(24, "banned")})
-			} else {
-				mc.writeResponse(StratumResponse{ID: reqID, Result: false, Error: newStratumError(20, err.Error())})
+			if !optimistic {
+				if banned, invalids := mc.noteInvalidSubmit(now, rejectInvalidCoinbase); banned {
+					mc.logBan(rejectInvalidCoinbase.String(), workerName, invalids)
+					mc.writeResponse(StratumResponse{ID: reqID, Result: false, Error: newStratumError(24, "banned")})
+				} else {
+					mc.writeResponse(StratumResponse{ID: reqID, Result: false, Error: newStratumError(20, err.Error())})
+				}
 			}
 			return
 		}
@@ -464,11 +486,13 @@ func (mc *MinerConn) processSubmissionTask(task submissionTask) {
 		logger.Warn("submit merkle mismatch", "remote", mc.id, "worker", workerName, "job", jobID)
 		detail := mc.buildShareDetailFromCoinbase(job, workerName, header, nil, nil, expectedMerkle, cbTx)
 		mc.recordShare(workerName, false, 0, 0, rejectInvalidMerkle.String(), "", detail, now)
-		if banned, invalids := mc.noteInvalidSubmit(now, rejectInvalidMerkle); banned {
-			mc.logBan(rejectInvalidMerkle.String(), workerName, invalids)
-			mc.writeResponse(StratumResponse{ID: reqID, Result: false, Error: newStratumError(24, "banned")})
-		} else {
-			mc.writeResponse(StratumResponse{ID: reqID, Result: false, Error: newStratumError(20, "invalid merkle")})
+		if !optimistic {
+			if banned, invalids := mc.noteInvalidSubmit(now, rejectInvalidMerkle); banned {
+				mc.logBan(rejectInvalidMerkle.String(), workerName, invalids)
+				mc.writeResponse(StratumResponse{ID: reqID, Result: false, Error: newStratumError(24, "banned")})
+			} else {
+				mc.writeResponse(StratumResponse{ID: reqID, Result: false, Error: newStratumError(20, "invalid merkle")})
+			}
 		}
 		return
 	}
@@ -543,15 +567,17 @@ func (mc *MinerConn) processSubmissionTask(task submissionTask) {
 		acceptedForStats := false
 		mc.recordShare(workerName, acceptedForStats, 0, shareDiff, "lowDiff", hashHex, detail, now)
 
-		if banned, invalids := mc.noteInvalidSubmit(now, rejectLowDiff); banned {
-			mc.logBan(rejectLowDiff.String(), workerName, invalids)
-			mc.writeResponse(StratumResponse{ID: reqID, Result: false, Error: newStratumError(24, "banned")})
-		} else {
-			mc.writeResponse(StratumResponse{
-				ID:     reqID,
-				Result: false,
-				Error:  []interface{}{23, fmt.Sprintf("low difficulty share (%.6g expected %.6g)", shareDiff, assignedDiff), nil},
-			})
+		if !optimistic {
+			if banned, invalids := mc.noteInvalidSubmit(now, rejectLowDiff); banned {
+				mc.logBan(rejectLowDiff.String(), workerName, invalids)
+				mc.writeResponse(StratumResponse{ID: reqID, Result: false, Error: newStratumError(24, "banned")})
+			} else {
+				mc.writeResponse(StratumResponse{
+					ID:     reqID,
+					Result: false,
+					Error:  []interface{}{23, fmt.Sprintf("low difficulty share (%.6g expected %.6g)", shareDiff, assignedDiff), nil},
+				})
+			}
 		}
 		return
 	}
@@ -560,7 +586,7 @@ func (mc *MinerConn) processSubmissionTask(task submissionTask) {
 	detail := mc.buildShareDetailFromCoinbase(job, workerName, header, hashLE, job.Target, merkleRoot, cbTx)
 
 	if isBlock {
-		mc.handleBlockShare(reqID, job, workerName, en2, ntime, nonce, useVersion, hashHex, shareDiff, now)
+		mc.handleBlockShare(reqID, job, workerName, en2, ntime, nonce, useVersion, hashHex, shareDiff, now, optimistic)
 		mc.trackBestShare(workerName, shareHash, shareDiff, now)
 		return
 	}
@@ -585,14 +611,16 @@ func (mc *MinerConn) processSubmissionTask(task submissionTask) {
 			"submit_rate_per_min", subRate,
 		)
 	}
-	mc.writeResponse(StratumResponse{ID: reqID, Result: true, Error: nil})
+	if !optimistic {
+		mc.writeAcceptResponse(reqID)
+	}
 }
 
 // handleBlockShare processes a share that satisfies the network target. It
 // builds the full block (reusing any dual-payout header/coinbase when
 // available), submits it via RPC, logs the reward split and found-block
 // record, and sends the final Stratum response.
-func (mc *MinerConn) handleBlockShare(reqID interface{}, job *Job, workerName string, en2 []byte, ntime string, nonce string, useVersion uint32, hashHex string, shareDiff float64, now time.Time) {
+func (mc *MinerConn) handleBlockShare(reqID interface{}, job *Job, workerName string, en2 []byte, ntime string, nonce string, useVersion uint32, hashHex string, shareDiff float64, now time.Time, optimistic bool) {
 	var (
 		blockHex  string
 		submitRes interface{}
@@ -674,7 +702,9 @@ func (mc *MinerConn) handleBlockShare(reqID interface{}, job *Job, workerName st
 				mc.metrics.RecordErrorEvent("submitblock", err.Error(), now)
 			}
 			logger.Error("submitblock build error", "remote", mc.id, "error", err)
-			mc.writeResponse(StratumResponse{ID: reqID, Result: false, Error: newStratumError(20, err.Error())})
+			if !optimistic {
+				mc.writeResponse(StratumResponse{ID: reqID, Result: false, Error: newStratumError(20, err.Error())})
+			}
 			return
 		}
 	}
@@ -695,7 +725,9 @@ func (mc *MinerConn) handleBlockShare(reqID interface{}, job *Job, workerName st
 		// that the block was accepted; it only preserves the data needed for
 		// a later submitblock attempt.
 		mc.logPendingSubmission(job, workerName, hashHex, blockHex, err)
-		mc.writeResponse(StratumResponse{ID: reqID, Result: false, Error: newStratumError(20, err.Error())})
+		if !optimistic {
+			mc.writeResponse(StratumResponse{ID: reqID, Result: false, Error: newStratumError(20, err.Error())})
+		}
 		return
 	}
 	if mc.metrics != nil {
@@ -750,7 +782,9 @@ func (mc *MinerConn) handleBlockShare(reqID interface{}, job *Job, workerName st
 			"worker_difficulty", stats.TotalDifficulty,
 		)
 	}
-	mc.writeResponse(StratumResponse{ID: reqID, Result: true, Error: nil})
+	if !optimistic {
+		mc.writeAcceptResponse(reqID)
+	}
 }
 
 // logFoundBlock appends a JSON line describing a found block to a log file in

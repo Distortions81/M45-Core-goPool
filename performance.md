@@ -164,3 +164,100 @@ per worker**, which halves the numbers:
 In practice, long before you hit these bandwidth limits you may hit other real
 world limits: file descriptors, kernel packet-per-second overhead, memory, and
 the CPU/UI limits earlier in this document.
+
+## Stratum latency optimizations
+
+goPool includes several optimizations to minimize share response latency, which
+is particularly important for miners that display "ping" measurements (like
+Bitaxe/ESP-Miner). These optimizations reduce the round-trip time from when a
+miner sends `mining.submit` to when it receives the pool's response.
+
+### TCP tuning (automatic)
+
+- **TCP_NODELAY**: Disables Nagle's algorithm on all stratum connections. This
+  prevents the kernel from buffering small packets (like stratum responses)
+  waiting for more data, eliminating up to 40ms of artificial delay.
+
+- **TCP keepalive** (30-second period): Enables OS-level connection probing to
+  detect dead connections faster than the default (often 2+ hours). This does
+  NOT affect idle miners—they can go minutes without submitting shares. It only
+  detects truly dead connections (crashed miner, network failure).
+
+### Sync share processing (default: enabled)
+
+By default, `sync_share_processing = true` processes share submissions
+synchronously in the miner's read goroutine instead of queueing to a worker
+pool. This eliminates queue latency at the cost of blocking the read loop
+during hash computation (~50-100µs on modern CPUs).
+
+**When to disable**: For very high-traffic pools (thousands of miners), set
+`sync_share_processing = false` in your config to use the async worker pool,
+which provides better throughput under heavy load.
+
+```toml
+# In config.toml - only disable for high-traffic pools
+sync_share_processing = false
+```
+
+### Optimistic share response (default: enabled)
+
+When `optimistic_share_response = true` (the default), the pool sends the "accepted" response
+**immediately** after basic parameter validation, before full share verification
+completes. This minimizes displayed latency (ping) by responding in ~1-2ms
+instead of 20-40ms.
+
+**Trade-offs**:
+- Invalid shares are still rejected (not counted toward rewards), but the miner
+  has already received "accepted" feedback
+- The miner's displayed ping will be much lower
+- Validation still happens; only the response timing changes
+
+```toml
+# In config.toml - disable if you prefer response after validation
+optimistic_share_response = false
+```
+
+**Note**: This is safe for solo pools since invalid shares simply don't count.
+The miner already submitted the work; whether validation happens before or
+after the response doesn't change the outcome.
+
+### Message size optimizations
+
+- **Incremental job IDs**: Job IDs use short incremental base36 encoding
+  (`"1"`, `"2"`, ... `"a"`, `"b"`, ... `"10"`...) instead of timestamps. First
+  ~1300 jobs fit in 1-2 characters, saving 8-17 bytes per `mining.notify`.
+
+- **Pre-serialized accept responses**: Share accept responses
+  (`{"id":N,"result":true,"error":null}`) are formatted directly for integer
+  IDs, bypassing JSON marshaling overhead.
+
+- **Smaller read buffer** (8KB): More cache-friendly for typical stratum
+  messages (<2KB). The buffer grows automatically for larger messages.
+
+### Expected latency breakdown
+
+On LAN with ~8ms ICMP ping, typical share response latency is **20-40ms**:
+
+| Component | Time |
+|-----------|------|
+| Network RTT (TCP) | ~10-15ms |
+| JSON parse (request) | ~0.1ms |
+| Share validation + hash | ~0.05-0.1ms |
+| JSON format (response) | ~0.05ms |
+| Miner-side processing | ~5-15ms |
+
+The miner's own processing time (ESP32 JSON parsing, timing measurement
+overhead) contributes significantly to the displayed "ping" value. The pool's
+actual processing time is typically <1ms.
+
+### Further latency notes
+
+- **ICMP vs TCP**: ICMP ping measures raw network latency. TCP adds connection
+  state overhead, so expect TCP round-trips to be 20-50% higher than ICMP.
+
+- **Miner firmware**: The displayed "ping" includes the miner's own processing
+  time. Different firmware versions may report different values for the same
+  pool latency.
+
+- **TLS overhead**: If using stratum TLS (`stratum_tls_listen`), expect ~1-2ms
+  additional latency for encryption/decryption.

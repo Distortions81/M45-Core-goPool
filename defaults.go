@@ -83,6 +83,8 @@ func defaultConfig() Config {
 		HashrateEMATauSeconds:         defaultHashrateEMATauSeconds,
 		HashrateEMAMinShares:          defaultHashrateEMAMinShares,
 		NTimeForwardSlackSeconds:      defaultNTimeForwardSlackSeconds,
+		SyncShareProcessing:           true, // Lower latency for solo/small pools
+		OptimisticShareResponse:       true, // Minimal ping for competitive metrics
 		BanInvalidSubmissionsAfter:    defaultBanInvalidSubmissionsAfter,
 		BanInvalidSubmissionsWindow:   defaultBanInvalidSubmissionsWindow,
 		BanInvalidSubmissionsDuration: defaultBanInvalidSubmissionsDuration,

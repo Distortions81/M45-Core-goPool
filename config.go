@@ -229,6 +229,18 @@ type Config struct {
 	// default for solo pools where duplicate checking is unnecessary overhead.
 	// Enable with -check-duplicates flag for testing.
 	CheckDuplicateShares bool
+	// SyncShareProcessing processes share submissions synchronously in the
+	// miner's read goroutine instead of queueing to the worker pool. This
+	// reduces latency at the cost of blocking the read loop during hash
+	// computation. Enabled by default; set to false for high-traffic pools.
+	SyncShareProcessing bool
+	// OptimisticShareResponse sends the "accepted" response immediately after
+	// basic parameter validation, before full share verification completes.
+	// This minimizes displayed latency (ping) at the cost of not catching
+	// invalid shares until after the response is sent. Invalid shares are
+	// still rejected (not counted) but the miner sees immediate feedback.
+	// Useful for competitive ping metrics. Default: false.
+	OptimisticShareResponse bool
 
 	// BanInvalidSubmissionsAfter controls how many clearly invalid share
 	// submissions (bad extranonce/ntime/nonce/coinbase, etc.) are allowed

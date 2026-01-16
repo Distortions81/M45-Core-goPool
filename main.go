@@ -669,6 +669,19 @@ func main() {
 				logger.Error("accept error", "listener", label, "error", err)
 				continue
 			}
+			// Tune TCP for low-latency stratum: disable Nagle's algorithm and
+			// enable keepalive for faster dead connection detection.
+			if tcpConn, ok := conn.(*net.TCPConn); ok {
+				_ = tcpConn.SetNoDelay(true)
+				_ = tcpConn.SetKeepAlive(true)
+				_ = tcpConn.SetKeepAlivePeriod(tcpKeepAlivePeriod)
+			} else if tlsConn, ok := conn.(*tls.Conn); ok {
+				if tcpConn, ok := tlsConn.NetConn().(*net.TCPConn); ok {
+					_ = tcpConn.SetNoDelay(true)
+					_ = tcpConn.SetKeepAlive(true)
+					_ = tcpConn.SetKeepAlivePeriod(tcpKeepAlivePeriod)
+				}
+			}
 			remote := conn.RemoteAddr().String()
 			if reconnectLimiter != nil {
 				host, _, errSplit := net.SplitHostPort(remote)

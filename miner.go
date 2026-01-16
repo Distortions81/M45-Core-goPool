@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding/hex"
 	"errors"
+	"fmt"
 	"io"
 	"math"
 	"math/big"
@@ -709,7 +710,7 @@ func NewMinerConn(ctx context.Context, c net.Conn, jobMgr *JobManager, rpc rpcCa
 		id:                c.RemoteAddr().String(),
 		conn:              c,
 		writer:            bufio.NewWriter(c),
-		reader:            bufio.NewReaderSize(c, maxStratumMessageSize),
+		reader:            bufio.NewReaderSize(c, stratumReadBufferSize),
 		jobMgr:            jobMgr,
 		rpc:               rpc,
 		cfg:               cfg,
@@ -831,6 +832,10 @@ func (mc *MinerConn) handle() {
 			mc.handleExtranonceSubscribe(&req)
 		case "mining.suggest_difficulty":
 			mc.suggestDifficulty(&req)
+		case "mining.ping":
+			// Respond immediately for latency measurement. Some miners use this
+			// to display pool ping without submitting a share.
+			mc.writeResponse(StratumResponse{ID: req.ID, Result: "pong", Error: nil})
 		default:
 			logger.Warn("unknown stratum method", "remote", mc.id, "method", req.Method)
 			if banned, count := mc.noteProtocolViolation(now); banned {
@@ -890,6 +895,53 @@ func (mc *MinerConn) currentReadTimeout() time.Duration {
 func (mc *MinerConn) writeResponse(resp StratumResponse) {
 	if err := mc.writeJSON(resp); err != nil {
 		logger.Error("write error", "remote", mc.id, "error", err)
+	}
+}
+
+// writeAcceptResponse sends a share-accepted response with minimal overhead.
+// It avoids JSON marshaling for common integer IDs by formatting directly.
+func (mc *MinerConn) writeAcceptResponse(id interface{}) {
+	mc.writeMu.Lock()
+	defer mc.writeMu.Unlock()
+
+	if err := mc.conn.SetWriteDeadline(time.Now().Add(stratumWriteTimeout)); err != nil {
+		logger.Error("write deadline error", "remote", mc.id, "error", err)
+		return
+	}
+
+	// Fast path for integer IDs (most common case).
+	var b []byte
+	switch v := id.(type) {
+	case int:
+		b = fmt.Appendf(nil, `{"id":%d,"result":true,"error":null}`+"\n", v)
+	case int64:
+		b = fmt.Appendf(nil, `{"id":%d,"result":true,"error":null}`+"\n", v)
+	case float64:
+		// JSON numbers come through as float64; if it's a whole number, format as int.
+		if v == float64(int64(v)) {
+			b = fmt.Appendf(nil, `{"id":%d,"result":true,"error":null}`+"\n", int64(v))
+		} else {
+			b = fmt.Appendf(nil, `{"id":%g,"result":true,"error":null}`+"\n", v)
+		}
+	default:
+		// Fallback to JSON marshaling for string IDs or other types.
+		resp := StratumResponse{ID: id, Result: true, Error: nil}
+		var err error
+		b, err = fastJSONMarshal(resp)
+		if err != nil {
+			logger.Error("marshal error", "remote", mc.id, "error", err)
+			return
+		}
+		b = append(b, '\n')
+	}
+
+	logNetMessage("send", b)
+	if _, err := mc.writer.Write(b); err != nil {
+		logger.Error("write error", "remote", mc.id, "error", err)
+		return
+	}
+	if err := mc.writer.Flush(); err != nil {
+		logger.Error("flush error", "remote", mc.id, "error", err)
 	}
 }
 

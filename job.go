@@ -123,6 +123,7 @@ type JobManager struct {
 	payoutScript      []byte
 	donationScript    []byte
 	extraID           uint32
+	jobID             uint64 // Monotonic job ID counter for short base36 IDs
 	subs              map[chan *Job]struct{}
 	subsMu            sync.Mutex
 	zmqHealthy        atomic.Bool
@@ -665,7 +666,7 @@ func (jm *JobManager) buildJob(ctx context.Context, tpl GetBlockTemplateResult) 
 	}
 
 	job := &Job{
-		JobID:                   fmt.Sprintf("%d", time.Now().UnixNano()),
+		JobID:                   strconv.FormatUint(atomic.AddUint64(&jm.jobID, 1), 36), // short incremental base36 IDs
 		Template:                tpl,
 		Target:                  target,
 		CreatedAt:               time.Now(),

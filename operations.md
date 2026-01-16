@@ -22,8 +22,18 @@
 
 ## Tuning highlights
 
+### Latency tuning
+
+- `sync_share_processing` (default `true`) – processes share submissions synchronously in the miner's read goroutine for lower latency. Set to `false` for high-traffic pools to use the async worker pool for better throughput under heavy load.
+
+- `optimistic_share_response` (default `true`) – sends the "accepted" response immediately after basic parameter validation, before full share verification. This dramatically reduces displayed ping (~1-2ms instead of 20-40ms) but means invalid shares get "accepted" feedback before being silently rejected. Safe for solo pools. Set to `false` if you prefer responses only after full validation.
+
+See [performance.md](performance.md) for details on latency tuning.
+
+### Share validation
+
 - `hashrate_ema_tau_seconds` – time constant (seconds) for the per-connection hashrate EMA used in worker stats. Larger values smooth the reports but react more slowly; default `600` (~10 minutes).
-- `ntime_forward_slack_seconds` – how far miners may roll `ntime` beyond the template’s `curtime` / `mintime`; default `7000`.
+- `ntime_forward_slack_seconds` – how far miners may roll `ntime` beyond the template's `curtime` / `mintime`; default `7000`.
 
 ## Launch flags
 

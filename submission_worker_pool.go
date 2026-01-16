@@ -45,6 +45,7 @@ type submissionTask struct {
 	scriptTime       int64
 	policyReject     submitPolicyReject
 	receivedAt       time.Time
+	optimistic       bool // Response already sent; skip sending in processSubmissionTask
 }
 
 type submitPolicyReject struct {

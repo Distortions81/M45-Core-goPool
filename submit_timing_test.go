@@ -97,7 +97,7 @@ func TestHandleBlockShareSubmitLatency(t *testing.T) {
 	req := &StratumRequest{ID: 1}
 
 	trpc.start = time.Now()
-	mc.handleBlockShare(req.ID, job, "worker1", en2, ntimeHex, nonceHex, useVersion, "dummyhash", 1.0, now)
+	mc.handleBlockShare(req.ID, job, "worker1", en2, ntimeHex, nonceHex, useVersion, "dummyhash", 1.0, now, false)
 
 	if trpc.method != "submitblock" {
 		t.Fatalf("expected submitblock RPC, got %q", trpc.method)
