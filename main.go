@@ -55,6 +55,7 @@ func main() {
 	stdoutLogFlag := flag.Bool("stdoutlog", false, "mirror logs to stdout in addition to writing to files")
 	noCleanBansFlag := flag.Bool("no-clean-bans", false, "skip rewriting the ban list on startup (keep expired bans)")
 	checkDuplicatesFlag := flag.Bool("check-duplicates", false, "enable duplicate share checking (disabled by default for solo pools)")
+	clearFoundBlocksFlag := flag.Bool("clear-found-blocks", false, "clear found-block history on startup (state DB)")
 	flag.Parse()
 	overrides := runtimeOverrides{
 		bind:                *bindFlag,
@@ -196,6 +197,13 @@ func main() {
 		}
 	}
 	configureFileLogging(logPath, errorLogPath, debugLogPath, *stdoutLogFlag)
+	if *clearFoundBlocksFlag {
+		if deleted, err := clearFoundBlocks(cfg.DataDir); err != nil {
+			logger.Warn("clear found blocks failed", "error", err)
+		} else {
+			logger.Info("cleared found blocks", "deleted", deleted)
+		}
+	}
 	ensureSubmissionWorkerPool()
 	defer logger.Stop()
 

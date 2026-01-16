@@ -209,3 +209,28 @@ func renameLegacyFileToOld(path string) error {
 	}
 	return nil
 }
+
+func clearFoundBlocks(dataDir string) (deleted int64, err error) {
+	db, err := openStateDB(stateDBPathFromDataDir(dataDir))
+	if err != nil {
+		return 0, err
+	}
+	defer db.Close()
+
+	res, err := db.Exec("DELETE FROM found_blocks_log")
+	if err != nil {
+		return 0, err
+	}
+	if n, err := res.RowsAffected(); err == nil {
+		deleted = n
+	}
+
+	legacy := filepath.Join(strings.TrimSpace(dataDir), "state", "found_blocks.jsonl")
+	if strings.TrimSpace(dataDir) == "" {
+		legacy = filepath.Join(defaultDataDir, "state", "found_blocks.jsonl")
+	}
+	if err := os.Remove(legacy); err != nil && !os.IsNotExist(err) {
+		return deleted, err
+	}
+	return deleted, nil
+}
