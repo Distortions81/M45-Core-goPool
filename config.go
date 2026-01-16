@@ -239,7 +239,7 @@ type Config struct {
 	// This minimizes displayed latency (ping) at the cost of not catching
 	// invalid shares until after the response is sent. Invalid shares are
 	// still rejected (not counted) but the miner sees immediate feedback.
-	// Useful for competitive ping metrics. Default: false.
+	// Useful for competitive ping metrics. Default: true.
 	OptimisticShareResponse bool
 
 	// BanInvalidSubmissionsAfter controls how many clearly invalid share

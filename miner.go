@@ -836,6 +836,11 @@ func (mc *MinerConn) handle() {
 			// Respond immediately for latency measurement. Some miners use this
 			// to display pool ping without submitting a share.
 			mc.writeResponse(StratumResponse{ID: req.ID, Result: "pong", Error: nil})
+		case "pong":
+			// Some firmwares reply to server-initiated pings with a JSON-RPC
+			// method="pong" message. Treat it as a no-op to avoid disconnecting
+			// otherwise healthy miners.
+			mc.writeResponse(StratumResponse{ID: req.ID, Result: true, Error: nil})
 		default:
 			logger.Warn("unknown stratum method", "remote", mc.id, "method", req.Method)
 			if banned, count := mc.noteProtocolViolation(now); banned {
