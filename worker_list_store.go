@@ -206,7 +206,7 @@ func (s *workerListStore) List(userID string) ([]SavedWorkerEntry, error) {
 	return workers, nil
 }
 
-func (s *workerListStore) SetSavedWorkerNotifyEnabled(userID, workerHash string, enabled bool, now time.Time) error {
+func (s *workerListStore) SetSavedWorkerNotifyEnabled(userID, workerHash string, enabled bool) error {
 	if s == nil || s.db == nil {
 		return nil
 	}
@@ -298,22 +298,24 @@ func (s *workerListStore) ListEnabledDiscordLinks() ([]discordLink, error) {
 	return out, nil
 }
 
-func (s *workerListStore) GetDiscordLink(userID string) (discordUserID string, enabled bool, ok bool, err error) {
+func (s *workerListStore) GetDiscordLink(userID string) (enabled bool, ok bool, err error) {
 	if s == nil || s.db == nil {
-		return "", false, false, nil
+		return false, false, nil
 	}
 	userID = strings.TrimSpace(userID)
 	if userID == "" {
-		return "", false, false, nil
+		return false, false, nil
 	}
+	var discordUserID string
 	var enabledInt int
 	if err := s.db.QueryRow("SELECT discord_user_id, enabled FROM discord_links WHERE user_id = ?", userID).Scan(&discordUserID, &enabledInt); err != nil {
 		if err == sql.ErrNoRows {
-			return "", false, false, nil
+			return false, false, nil
 		}
-		return "", false, false, err
+		return false, false, err
 	}
-	return strings.TrimSpace(discordUserID), enabledInt != 0, true, nil
+	_ = strings.TrimSpace(discordUserID) // stored; returned only if/when needed elsewhere
+	return enabledInt != 0, true, nil
 }
 
 func (s *workerListStore) LoadDiscordWorkerStates(userID string) (map[string]workerNotifyState, error) {
@@ -378,7 +380,7 @@ func (s *workerListStore) SetDiscordLinkEnabled(userID string, enabled bool, now
 		return false, nil
 	}
 
-	if _, _, exists, err := s.GetDiscordLink(userID); err != nil {
+	if _, exists, err := s.GetDiscordLink(userID); err != nil {
 		return false, err
 	} else if !exists {
 		return false, nil

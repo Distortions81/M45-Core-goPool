@@ -397,7 +397,7 @@ func (s *StatusServer) handleSavedWorkersJSON(w http.ResponseWriter, r *http.Req
 		strings.TrimSpace(s.Config().DiscordServerID) != "" &&
 		strings.TrimSpace(s.Config().DiscordBotToken) != "" &&
 		strings.TrimSpace(s.Config().DiscordNotifyChannelID) != "" {
-		if _, enabled, ok, err := s.workerLists.GetDiscordLink(user.UserID); err == nil {
+		if enabled, ok, err := s.workerLists.GetDiscordLink(user.UserID); err == nil {
 			discordRegistered = ok
 			discordUserEnabled = ok && enabled
 		}
@@ -646,8 +646,7 @@ func (s *StatusServer) handleSavedWorkersNotifyEnabled(w http.ResponseWriter, r 
 		return
 	}
 
-	now := time.Now()
-	if err := s.workerLists.SetSavedWorkerNotifyEnabled(user.UserID, hash, *parsed.Enabled, now); err != nil {
+	if err := s.workerLists.SetSavedWorkerNotifyEnabled(user.UserID, hash, *parsed.Enabled); err != nil {
 		logger.Warn("saved worker notify toggle failed", "error", err, "user_id", user.UserID)
 		http.Error(w, "Internal server error", http.StatusInternalServerError)
 		return
