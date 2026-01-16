@@ -1011,6 +1011,60 @@ func (jm *JobManager) Ready() bool {
 	return jm.curJob != nil
 }
 
+func (jm *JobManager) WorkReady(job *Job) (bool, string) {
+	if jm == nil || jm.rpc == nil {
+		return false, "rpc not configured"
+	}
+	if job == nil {
+		return false, "no job available"
+	}
+
+	callCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	var bc struct {
+		Blocks               int64 `json:"blocks"`
+		Headers              int64 `json:"headers"`
+		InitialBlockDownload bool  `json:"initialblockdownload"`
+	}
+	if err := jm.rpc.callCtx(callCtx, "getblockchaininfo", nil, &bc); err != nil {
+		return false, "getblockchaininfo failed: " + err.Error()
+	}
+	if bc.InitialBlockDownload {
+		return false, "node in initial block download"
+	}
+	if bc.Blocks <= 0 {
+		return false, "node height unknown"
+	}
+	if bc.Headers > 0 && bc.Headers-bc.Blocks > 2 {
+		return false, fmt.Sprintf("node behind headers (blocks=%d headers=%d)", bc.Blocks, bc.Headers)
+	}
+
+	if job.Template.Height > 0 {
+		wantHeight := bc.Blocks + 1
+		if absInt64(job.Template.Height-wantHeight) > 2 {
+			return false, fmt.Sprintf("template height mismatch (template=%d node=%d)", job.Template.Height, bc.Blocks)
+		}
+	}
+
+	var bestHash string
+	if err := jm.rpc.callCtx(callCtx, "getbestblockhash", nil, &bestHash); err != nil {
+		return false, "getbestblockhash failed: " + err.Error()
+	}
+	if job.Template.Previous != "" && bestHash != "" && job.Template.Previous != bestHash {
+		return false, "stale template (prevhash mismatch)"
+	}
+
+	return true, ""
+}
+
+func absInt64(v int64) int64 {
+	if v < 0 {
+		return -v
+	}
+	return v
+}
+
 func (jm *JobManager) NextExtranonce1() []byte {
 	id := atomic.AddUint32(&jm.extraID, 1)
 	var buf [4]byte // Use fixed-size array instead of slice allocation

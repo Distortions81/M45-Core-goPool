@@ -26,6 +26,25 @@ func (c *countingSubmitRPC) callCtx(_ context.Context, method string, params int
 	return nil
 }
 
+type rejectingSubmitRPC struct {
+	submitCalls atomic.Int64
+	result      interface{}
+}
+
+func (c *rejectingSubmitRPC) call(method string, params interface{}, out interface{}) error {
+	return c.callCtx(context.Background(), method, params, out)
+}
+
+func (c *rejectingSubmitRPC) callCtx(_ context.Context, method string, params interface{}, out interface{}) error {
+	if method == "submitblock" {
+		c.submitCalls.Add(1)
+		if ptr, ok := out.(*interface{}); ok {
+			*ptr = c.result
+		}
+	}
+	return nil
+}
+
 func flushFoundBlockLog(t *testing.T) {
 	t.Helper()
 	done := make(chan struct{})
@@ -87,6 +106,55 @@ func TestWinningBlockNotRejectedAsDuplicate(t *testing.T) {
 	rpc := mc.rpc.(*countingSubmitRPC)
 	if got := rpc.submitCalls.Load(); got != 1 {
 		t.Fatalf("expected submitblock to be called once, got %d", got)
+	}
+}
+
+func TestSubmitblockRejectDoesNotLogFoundBlock(t *testing.T) {
+	metrics := NewPoolMetrics()
+	mc := benchmarkMinerConnForSubmit(metrics)
+	mc.cfg.DataDir = t.TempDir()
+	mc.rpc = &rejectingSubmitRPC{result: "duplicate"}
+
+	job := benchmarkSubmitJobForTest(t)
+	job.Target = new(big.Int).Set(maxUint256)
+	jobID := job.JobID
+	mc.jobDifficulty[jobID] = 1e-12
+	mc.jobScriptTime = map[string]int64{jobID: job.ScriptTime}
+
+	ntimeHex := "6553f100" // 1700000000
+	task := submissionTask{
+		mc:               mc,
+		reqID:            1,
+		job:              job,
+		jobID:            jobID,
+		workerName:       "worker1",
+		extranonce2:      "00000000",
+		extranonce2Bytes: []byte{0, 0, 0, 0},
+		ntime:            ntimeHex,
+		nonce:            "00000000",
+		versionHex:       "00000001",
+		useVersion:       1,
+		scriptTime:       job.ScriptTime,
+		receivedAt:       time.Unix(1700000000, 0),
+	}
+
+	mc.conn = nopConn{}
+	mc.writer = bufio.NewWriterSize(mc.conn, 256)
+	mc.processSubmissionTask(task)
+	flushFoundBlockLog(t)
+
+	db, err := openStateDB(stateDBPathFromDataDir(mc.cfg.DataDir))
+	if err != nil {
+		t.Fatalf("open state db: %v", err)
+	}
+	defer db.Close()
+
+	var count int
+	if err := db.QueryRow("SELECT COUNT(*) FROM found_blocks_log").Scan(&count); err != nil {
+		t.Fatalf("count found blocks: %v", err)
+	}
+	if count != 0 {
+		t.Fatalf("expected no found block log entries, got %d", count)
 	}
 }
 

@@ -1139,6 +1139,24 @@ func (mc *MinerConn) handleBlockShare(reqID interface{}, job *Job, workerName st
 		}
 		return
 	}
+
+	// Bitcoin Core's submitblock returns a non-null string result when the block
+	// is rejected ("high-hash", "duplicate", "inconclusive", ...). Transport
+	// errors come back as err != nil above.
+	if submitRes != nil {
+		reject := fmt.Sprintf("%v", submitRes)
+		logger.Warn("submitblock rejected", "remote", mc.id, "result", reject, "hash", hashHex, "height", job.Template.Height)
+		if mc.metrics != nil {
+			mc.metrics.RecordErrorEvent("submitblock", "rejected: "+reject, time.Now())
+		}
+		if !optimistic {
+			// Keep the Stratum response consistent with prior behavior (share
+			// accepted at the pool layer), but do not record it as a found block.
+			mc.writeAcceptResponse(reqID)
+		}
+		return
+	}
+
 	if mc.metrics != nil {
 		mc.metrics.RecordBlockSubmission("accepted")
 	}

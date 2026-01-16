@@ -193,6 +193,10 @@ func (mc *MinerConn) handleAuthorize(req *StratumRequest) {
 	// to be valid, send initial difficulty and a job so hashing can start.
 	// First job always has clean_jobs=true so the miner starts fresh.
 	if job := mc.jobMgr.CurrentJob(); job != nil {
+		if ok, reason := mc.jobMgr.WorkReady(job); !ok {
+			logger.Warn("authorized but node not ready; withholding work", "remote", mc.id, "reason", reason)
+			return
+		}
 		mc.setDifficulty(mc.vardiff.MinDiff)
 		mc.sendNotifyFor(job, true)
 	}
@@ -340,6 +344,13 @@ func (mc *MinerConn) handleConfigure(req *StratumRequest) {
 }
 
 func (mc *MinerConn) sendNotifyFor(job *Job, forceClean bool) {
+	if mc.jobMgr != nil {
+		if ok, reason := mc.jobMgr.WorkReady(job); !ok {
+			logger.Warn("not sending work; node not ready", "remote", mc.id, "reason", reason)
+			return
+		}
+	}
+
 	// Opportunistically adjust difficulty before notifying about the job.
 	// If difficulty changed, force clean so the miner uses the new difficulty.
 	if mc.maybeAdjustDifficulty(time.Now()) {
