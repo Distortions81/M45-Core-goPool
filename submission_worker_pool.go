@@ -2,6 +2,7 @@ package main
 
 import (
 	"runtime"
+	"runtime/debug"
 	"sync"
 	"time"
 )
@@ -22,16 +23,21 @@ var (
 
 func ensureSubmissionWorkerPool() {
 	submissionWorkerOnce.Do(func() {
-		workers := runtime.NumCPU()
-		if workers <= 0 {
-			workers = 1
-		}
-		submissionWorkers = newSubmissionWorkerPool(workers)
+		submissionWorkers = newSubmissionWorkerPool(defaultSubmissionWorkerCount())
 	})
+}
+
+func defaultSubmissionWorkerCount() int {
+	// Prefer GOMAXPROCS (actual parallelism) over NumCPU (hardware threads).
+	if n := runtime.GOMAXPROCS(0); n > 0 {
+		return n
+	}
+	return 1
 }
 
 type submissionTask struct {
 	mc               *MinerConn
+	rawLine          []byte
 	reqID            interface{}
 	job              *Job
 	jobID            string
@@ -60,13 +66,8 @@ type submissionWorkerPool struct {
 }
 
 func newSubmissionWorkerPool(workerCount int) *submissionWorkerPool {
-	if workerCount <= 0 {
-		workerCount = 1
-	}
-	queueDepth := workerCount * submissionWorkerQueueMultiplier
-	if queueDepth < submissionWorkerQueueMinDepth {
-		queueDepth = submissionWorkerQueueMinDepth
-	}
+	workerCount = normalizeWorkerCount(workerCount)
+	queueDepth := submissionWorkerQueueDepth(workerCount)
 	pool := &submissionWorkerPool{
 		tasks: make(chan submissionTask, queueDepth),
 	}
@@ -82,13 +83,30 @@ func (p *submissionWorkerPool) submit(task submissionTask) {
 
 func (p *submissionWorkerPool) worker(id int) {
 	for task := range p.tasks {
-		func(t submissionTask) {
-			defer func() {
-				if r := recover(); r != nil {
-					logger.Error("submission worker panic", "worker", id, "error", r)
-				}
-			}()
-			t.mc.processSubmissionTask(t)
-		}(task)
+		p.processTask(id, task)
 	}
+}
+
+func (p *submissionWorkerPool) processTask(id int, task submissionTask) {
+	defer func() {
+		if r := recover(); r != nil {
+			logger.Error("submission worker panic", "worker", id, "error", r, "stack", string(debug.Stack()))
+		}
+	}()
+	task.mc.processSubmissionTask(task)
+}
+
+func normalizeWorkerCount(workerCount int) int {
+	if workerCount <= 0 {
+		return 1
+	}
+	return workerCount
+}
+
+func submissionWorkerQueueDepth(workerCount int) int {
+	queueDepth := workerCount * submissionWorkerQueueMultiplier
+	if queueDepth < submissionWorkerQueueMinDepth {
+		queueDepth = submissionWorkerQueueMinDepth
+	}
+	return queueDepth
 }

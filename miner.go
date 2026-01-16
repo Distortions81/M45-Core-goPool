@@ -810,6 +810,25 @@ func (mc *MinerConn) handle() {
 		}
 		mc.recordActivity(now)
 
+		// Ultra-low-latency fast path for miners that display pool time/ping as the
+		// mining.submit round-trip (e.g. ESP-Miner). When enabled, send the
+		// "accepted" response as soon as we can extract the JSON-RPC id, and do
+		// full parsing/validation asynchronously.
+		if mc.cfg.OptimisticShareResponse && mc.authorized {
+			if idRaw, ok := fastMiningSubmitID(line); ok {
+				mc.writeAcceptResponseRaw(idRaw)
+				ensureSubmissionWorkerPool()
+				raw := append([]byte(nil), line...)
+				submissionWorkers.submit(submissionTask{
+					mc:        mc,
+					rawLine:   raw,
+					receivedAt: now,
+					optimistic: true,
+				})
+				continue
+			}
+		}
+
 		var req StratumRequest
 		if err := fastJSONUnmarshal(line, &req); err != nil {
 			logger.Warn("json error from miner", "remote", mc.id, "error", err)
@@ -941,6 +960,33 @@ func (mc *MinerConn) writeAcceptResponse(id interface{}) {
 		b = append(b, '\n')
 	}
 
+	logNetMessage("send", b)
+	if _, err := mc.writer.Write(b); err != nil {
+		logger.Error("write error", "remote", mc.id, "error", err)
+		return
+	}
+	if err := mc.writer.Flush(); err != nil {
+		logger.Error("flush error", "remote", mc.id, "error", err)
+	}
+}
+
+// writeAcceptResponseRaw sends a share-accepted response using a raw JSON-RPC id
+// token (number/string/null) already extracted from the request.
+func (mc *MinerConn) writeAcceptResponseRaw(idRaw []byte) {
+	mc.writeMu.Lock()
+	defer mc.writeMu.Unlock()
+
+	if err := mc.conn.SetWriteDeadline(time.Now().Add(stratumWriteTimeout)); err != nil {
+		logger.Error("write deadline error", "remote", mc.id, "error", err)
+		return
+	}
+	if len(idRaw) == 0 {
+		return
+	}
+	b := make([]byte, 0, len(idRaw)+64)
+	b = append(b, `{"id":`...)
+	b = append(b, idRaw...)
+	b = append(b, `,"result":true,"error":null}`+"\n"...)
 	logNetMessage("send", b)
 	if _, err := mc.writer.Write(b); err != nil {
 		logger.Error("write error", "remote", mc.id, "error", err)

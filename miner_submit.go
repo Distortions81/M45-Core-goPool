@@ -22,6 +22,11 @@ type submitParams struct {
 	submittedVersion uint32
 }
 
+type blockBuildHint struct {
+	header     []byte
+	coinbaseTx []byte
+}
+
 // parseSubmitParams validates and extracts the core fields from a mining.submit
 // request, recording and responding to any parameter errors. It returns params
 // and ok=false when a response has already been sent.
@@ -130,6 +135,97 @@ func (mc *MinerConn) parseSubmitParams(req *StratumRequest, now time.Time) (subm
 	return out, true
 }
 
+// parseSubmitParamsSilent is the same as parseSubmitParams but does not write
+// any Stratum response. It is used by optimistic "fast-ack" paths where the
+// miner has already received an accepted response.
+func (mc *MinerConn) parseSubmitParamsSilent(req *StratumRequest, now time.Time) (submitParams, bool) {
+	var out submitParams
+
+	if len(req.Params) < 5 || len(req.Params) > 6 {
+		logger.Warn("submit invalid params", "remote", mc.id, "params", req.Params)
+		mc.recordShare("", false, 0, 0, "invalid params", "", nil, now)
+		return out, false
+	}
+
+	worker, ok := req.Params[0].(string)
+	if !ok {
+		mc.recordShare("", false, 0, 0, "invalid worker", "", nil, now)
+		return out, false
+	}
+	if len(worker) == 0 {
+		mc.recordShare("", false, 0, 0, "empty worker", "", nil, now)
+		return out, false
+	}
+	if len(worker) > maxWorkerNameLen {
+		logger.Warn("submit rejected: worker name too long", "remote", mc.id, "len", len(worker))
+		mc.recordShare("", false, 0, 0, "worker name too long", "", nil, now)
+		return out, false
+	}
+
+	jobID, ok := req.Params[1].(string)
+	if !ok {
+		mc.recordShare(worker, false, 0, 0, "invalid job id", "", nil, now)
+		return out, false
+	}
+	if len(jobID) == 0 {
+		mc.recordShare(worker, false, 0, 0, "empty job id", "", nil, now)
+		return out, false
+	}
+	if len(jobID) > maxJobIDLen {
+		logger.Warn("submit rejected: job id too long", "remote", mc.id, "len", len(jobID))
+		mc.recordShare(worker, false, 0, 0, "job id too long", "", nil, now)
+		return out, false
+	}
+
+	extranonce2, ok := req.Params[2].(string)
+	if !ok {
+		mc.recordShare(worker, false, 0, 0, "invalid extranonce2", "", nil, now)
+		return out, false
+	}
+	ntime, ok := req.Params[3].(string)
+	if !ok {
+		mc.recordShare(worker, false, 0, 0, "invalid ntime", "", nil, now)
+		return out, false
+	}
+	nonce, ok := req.Params[4].(string)
+	if !ok {
+		mc.recordShare(worker, false, 0, 0, "invalid nonce", "", nil, now)
+		return out, false
+	}
+
+	submittedVersion := uint32(0)
+	if len(req.Params) == 6 {
+		verStr, ok := req.Params[5].(string)
+		if !ok {
+			mc.recordShare(worker, false, 0, 0, "invalid version", "", nil, now)
+			return out, false
+		}
+		if len(verStr) == 0 {
+			mc.recordShare(worker, false, 0, 0, "empty version", "", nil, now)
+			return out, false
+		}
+		if len(verStr) > maxVersionHexLen {
+			logger.Warn("submit rejected: version too long", "remote", mc.id, "len", len(verStr))
+			mc.recordShare(worker, false, 0, 0, "version too long", "", nil, now)
+			return out, false
+		}
+		verVal, err := parseUint32BEHex(verStr)
+		if err != nil {
+			mc.recordShare(worker, false, 0, 0, "invalid version", "", nil, now)
+			return out, false
+		}
+		submittedVersion = verVal
+	}
+
+	out.worker = worker
+	out.jobID = jobID
+	out.extranonce2 = extranonce2
+	out.ntime = ntime
+	out.nonce = nonce
+	out.submittedVersion = submittedVersion
+	return out, true
+}
+
 func (mc *MinerConn) handleSubmit(req *StratumRequest) {
 	// Expect params like:
 	// [worker_name, job_id, extranonce2, ntime, nonce]
@@ -221,6 +317,61 @@ func (mc *MinerConn) prepareSubmissionTaskOptimistic(req *StratumRequest, now ti
 		nonce:            params.nonce,
 		submittedVersion: params.submittedVersion,
 		receivedAt:       now,
+	}, true
+}
+
+// prepareSubmissionTaskOptimisticSilent is like prepareSubmissionTaskOptimistic
+// but does not write any Stratum response.
+func (mc *MinerConn) prepareSubmissionTaskOptimisticSilent(req *StratumRequest, now time.Time) (submissionTask, bool) {
+	params, ok := mc.parseSubmitParamsSilent(req, now)
+	if !ok {
+		return submissionTask{}, false
+	}
+
+	if !mc.authorized {
+		logger.Warn("submit rejected: unauthorized", "remote", mc.id)
+		mc.recordShare(params.worker, false, 0, 0, "unauthorized", "", nil, now)
+		if mc.metrics != nil {
+			mc.metrics.RecordSubmitError("unauthorized")
+		}
+		return submissionTask{}, false
+	}
+
+	authorizedWorker := strings.TrimSpace(mc.currentWorker())
+	submitWorker := strings.TrimSpace(params.worker)
+	if authorizedWorker != "" && submitWorker != authorizedWorker {
+		logger.Warn("submit rejected: worker mismatch", "remote", mc.id, "authorized", authorizedWorker, "submitted", submitWorker)
+		mc.recordShare(authorizedWorker, false, 0, 0, "unauthorized worker", "", nil, now)
+		if mc.metrics != nil {
+			mc.metrics.RecordSubmitError("worker_mismatch")
+		}
+		return submissionTask{}, false
+	}
+
+	workerName := authorizedWorker
+	if workerName == "" {
+		workerName = params.worker
+	}
+	if mc.isBanned(now) {
+		until, reason, _ := mc.banDetails()
+		logger.Warn("submit rejected: banned", "miner", mc.minerName(workerName), "ban_until", until, "reason", reason)
+		if mc.metrics != nil {
+			mc.metrics.RecordSubmitError("banned")
+		}
+		return submissionTask{}, false
+	}
+
+	return submissionTask{
+		mc:               mc,
+		reqID:            req.ID,
+		jobID:            params.jobID,
+		workerName:       workerName,
+		extranonce2:      params.extranonce2,
+		ntime:            params.ntime,
+		nonce:            params.nonce,
+		submittedVersion: params.submittedVersion,
+		receivedAt:       now,
+		optimistic:       true,
 	}, true
 }
 
@@ -544,6 +695,22 @@ func (mc *MinerConn) completeSubmissionTaskForProcessing(task submissionTask) (s
 }
 
 func (mc *MinerConn) processSubmissionTask(task submissionTask) {
+	if task.rawLine != nil {
+		var req StratumRequest
+		if err := fastJSONUnmarshal(task.rawLine, &req); err != nil {
+			logger.Warn("submit: json error in fast-ack path", "remote", mc.id, "error", err)
+			mc.recordShare("", false, 0, 0, "invalid stratum json", "", nil, task.receivedAt)
+			return
+		}
+		parsed, ok := mc.prepareSubmissionTaskOptimisticSilent(&req, task.receivedAt)
+		if !ok {
+			return
+		}
+		// Preserve the original receivedAt timestamp.
+		parsed.receivedAt = task.receivedAt
+		task = parsed
+	}
+
 	if task.job == nil || task.extranonce2Bytes == nil {
 		var ok bool
 		task, ok = mc.completeSubmissionTaskForProcessing(task)
@@ -785,15 +952,17 @@ func (mc *MinerConn) processSubmissionTask(task submissionTask) {
 		return
 	}
 
-	shareHash := hashHex
-	detail := mc.buildShareDetailFromCoinbase(job, workerName, header, hashLE, job.Target, merkleRoot, cbTx)
-
 	if isBlock {
-		mc.handleBlockShare(reqID, job, workerName, en2, ntime, nonce, useVersion, hashHex, shareDiff, now, optimistic)
-		mc.trackBestShare(workerName, shareHash, shareDiff, now)
+		mc.handleBlockShare(reqID, job, workerName, en2, ntime, nonce, useVersion, hashHex, shareDiff, now, optimistic, &blockBuildHint{
+			header:     header,
+			coinbaseTx: cbTx,
+		})
+		mc.trackBestShare(workerName, hashHex, shareDiff, now)
 		return
 	}
 
+	shareHash := hashHex
+	detail := mc.buildShareDetailFromCoinbase(job, workerName, header, hashLE, job.Target, merkleRoot, cbTx)
 	mc.recordShare(workerName, true, creditedDiff, shareDiff, "", shareHash, detail, now)
 	mc.trackBestShare(workerName, shareHash, shareDiff, now)
 	if mc.maybeAdjustDifficulty(now) {
@@ -819,11 +988,34 @@ func (mc *MinerConn) processSubmissionTask(task submissionTask) {
 	}
 }
 
+func buildBlockHexFromHeaderAndCoinbase(job *Job, header []byte, coinbaseTx []byte) (string, error) {
+	if job == nil || len(header) == 0 || len(coinbaseTx) == 0 {
+		return "", fmt.Errorf("missing block parts")
+	}
+
+	buf := blockBufferPool.Get().(*bytes.Buffer)
+	buf.Reset()
+	defer blockBufferPool.Put(buf)
+
+	buf.Write(header)
+	writeVarInt(buf, uint64(1+len(job.Transactions)))
+	buf.Write(coinbaseTx)
+	for _, tx := range job.Transactions {
+		raw, err := hex.DecodeString(tx.Data)
+		if err != nil {
+			return "", fmt.Errorf("decode tx data: %w", err)
+		}
+		buf.Write(raw)
+	}
+
+	return hex.EncodeToString(buf.Bytes()), nil
+}
+
 // handleBlockShare processes a share that satisfies the network target. It
 // builds the full block (reusing any dual-payout header/coinbase when
 // available), submits it via RPC, logs the reward split and found-block
 // record, and sends the final Stratum response.
-func (mc *MinerConn) handleBlockShare(reqID interface{}, job *Job, workerName string, en2 []byte, ntime string, nonce string, useVersion uint32, hashHex string, shareDiff float64, now time.Time, optimistic bool) {
+func (mc *MinerConn) handleBlockShare(reqID interface{}, job *Job, workerName string, en2 []byte, ntime string, nonce string, useVersion uint32, hashHex string, shareDiff float64, now time.Time, optimistic bool, hint *blockBuildHint) {
 	var (
 		blockHex  string
 		submitRes interface{}
@@ -831,9 +1023,20 @@ func (mc *MinerConn) handleBlockShare(reqID interface{}, job *Job, workerName st
 	)
 	scriptTime := mc.scriptTimeForJob(job.JobID, job.ScriptTime)
 
+	if hint != nil && len(hint.header) > 0 && len(hint.coinbaseTx) > 0 {
+		blockHex, err = buildBlockHexFromHeaderAndCoinbase(job, hint.header, hint.coinbaseTx)
+		if err != nil {
+			logger.Warn("fast block build failed; falling back", "remote", mc.id, "error", err)
+			blockHex = ""
+			err = nil
+		}
+	}
+
 	// Only construct the full block (including all non-coinbase transactions)
 	// when the share actually satisfies the network target.
-	if poolScript, workerScript, totalValue, feePercent, ok := mc.dualPayoutParams(job, workerName); ok {
+	if blockHex == "" {
+		poolScript, workerScript, totalValue, feePercent, ok := mc.dualPayoutParams(job, workerName)
+		if ok {
 		var cbTx, cbTxid []byte
 		var err error
 		if job.OperatorDonationPercent > 0 && len(job.DonationScript) > 0 {
@@ -893,6 +1096,7 @@ func (mc *MinerConn) handleBlockShare(reqID interface{}, job *Job, workerName st
 				}
 			}
 		}
+	}
 	}
 	if blockHex == "" {
 		// Fallback to single-output block build if dual-payout params are
