@@ -192,7 +192,7 @@ func (mc *MinerConn) noteProtocolViolation(now time.Time) (bool, int) {
 // clearly invalid submissions (bad extranonce, ntime, nonce, etc.).
 func (mc *MinerConn) rejectShareWithBan(req *StratumRequest, workerName string, reason submitRejectReason, errCode int, errMsg string, now time.Time) {
 	reasonText := reason.String()
-	mc.recordShare(workerName, false, 0, 0, reasonText, "", nil, now)
+	mc.recordShare(workerName, false, 0, 0, reasonText, nil, nil, now)
 	if banned, invalids := mc.noteInvalidSubmit(now, reason); banned {
 		mc.logBan(reasonText, workerName, invalids)
 		mc.writeResponse(StratumResponse{
@@ -216,7 +216,7 @@ func (mc *MinerConn) rejectShareWithBan(req *StratumRequest, workerName string, 
 // received an "accepted" reply and invalid shares should be silently rejected.
 func (mc *MinerConn) rejectShareWithBanMaybeSilent(reqID interface{}, workerName string, reason submitRejectReason, errCode int, errMsg string, now time.Time, silent bool) {
 	reasonText := reason.String()
-	mc.recordShare(workerName, false, 0, 0, reasonText, "", nil, now)
+	mc.recordShare(workerName, false, 0, 0, reasonText, nil, nil, now)
 	if banned, invalids := mc.noteInvalidSubmit(now, reason); banned {
 		mc.logBan(reasonText, workerName, invalids)
 		if !silent {
@@ -432,13 +432,6 @@ func (mc *MinerConn) scriptTimeForJob(jobID string, fallback int64) int64 {
 		return st
 	}
 	return fallback
-}
-
-func (mc *MinerConn) jobForID(jobID string) (*Job, bool) {
-	mc.jobMu.Lock()
-	defer mc.jobMu.Unlock()
-	job, ok := mc.activeJobs[jobID]
-	return job, ok
 }
 
 // jobForIDWithLast returns the job for the given ID along with the current lastJob

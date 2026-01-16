@@ -54,7 +54,7 @@ func workerViewFromConn(mc *MinerConn, now time.Time) WorkerView {
 	}
 	vardiff := mc.suggestedVardiff(now, snap)
 	banned := mc.isBanned(now)
-	until, reason, _ := mc.banDetails()
+	until, reason := mc.banDetails()
 	return WorkerView{
 		Name:                name,
 		DisplayName:         displayName,

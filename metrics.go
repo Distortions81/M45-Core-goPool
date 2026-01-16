@@ -660,6 +660,22 @@ func (m *PoolMetrics) SnapshotBestShares() []BestShare {
 	return out
 }
 
+// ShouldTrackBestShare reports whether a share with the given difficulty could
+// rank in the top-N best shares. It is used to avoid per-share allocations on
+// the hot path when a share can't possibly be recorded.
+func (m *PoolMetrics) ShouldTrackBestShare(difficulty float64) bool {
+	if m == nil || difficulty <= 0 {
+		return false
+	}
+
+	m.bestSharesMu.RLock()
+	defer m.bestSharesMu.RUnlock()
+	if m.bestShareCount < defaultBestShareLimit {
+		return true
+	}
+	return difficulty > m.bestShares[m.bestShareCount-1].Difficulty
+}
+
 // TrackBestShare normalizes a share entry and records it if it ranks in the top N.
 func (m *PoolMetrics) TrackBestShare(worker, hash string, difficulty float64, timestamp time.Time) {
 	if m == nil {

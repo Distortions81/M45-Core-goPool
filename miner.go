@@ -85,7 +85,8 @@ type statsUpdate struct {
 	creditedDiff float64
 	shareDiff    float64
 	reason       string
-	shareHash    string
+	shareHashLE  [32]byte
+	hasShareHash bool
 	detail       *ShareDetail
 	timestamp    time.Time
 }
@@ -244,7 +245,8 @@ type MinerConn struct {
 	poolMask             uint32
 	minerMask            uint32
 	minVerBits           int
-	lastShareHash        string
+	lastShareHashLE      [32]byte
+	lastShareHashSet     bool
 	lastShareAccepted    bool
 	lastShareDifficulty  float64
 	lastShareDetail      *ShareDetail
@@ -409,7 +411,10 @@ func (mc *MinerConn) statsWorker() {
 		}
 		mc.stats.LastShare = update.timestamp
 
-		mc.lastShareHash = update.shareHash
+		if update.hasShareHash {
+			mc.lastShareHashLE = update.shareHashLE
+			mc.lastShareHashSet = true
+		}
 		mc.lastShareAccepted = update.accepted
 		mc.lastShareDifficulty = update.shareDiff
 		mc.lastShareDetail = update.detail
@@ -818,10 +823,9 @@ func (mc *MinerConn) handle() {
 			if idRaw, ok := fastMiningSubmitID(line); ok {
 				mc.writeAcceptResponseRaw(idRaw)
 				ensureSubmissionWorkerPool()
-				raw := append([]byte(nil), line...)
 				submissionWorkers.submit(submissionTask{
-					mc:        mc,
-					rawLine:   raw,
+					mc:         mc,
+					rawLine:    line,
 					receivedAt: now,
 					optimistic: true,
 				})
@@ -1065,7 +1069,7 @@ func (mc *MinerConn) ensureWindowLocked(now time.Time) {
 // shareDiff is the difficulty implied by the submitted hash (used for
 // display/detail). They may differ when vardiff changed between notify and
 // submit; we always want hashrate to use the assigned target.
-func (mc *MinerConn) recordShare(worker string, accepted bool, creditedDiff float64, shareDiff float64, reason string, shareHash string, detail *ShareDetail, now time.Time) {
+func (mc *MinerConn) recordShare(worker string, accepted bool, creditedDiff float64, shareDiff float64, reason string, shareHashLE []byte, detail *ShareDetail, now time.Time) {
 	// Send update to async stats worker instead of blocking on mutex
 	update := statsUpdate{
 		worker:       worker,
@@ -1073,9 +1077,12 @@ func (mc *MinerConn) recordShare(worker string, accepted bool, creditedDiff floa
 		creditedDiff: creditedDiff,
 		shareDiff:    shareDiff,
 		reason:       reason,
-		shareHash:    shareHash,
 		detail:       detail,
 		timestamp:    now,
+	}
+	if len(shareHashLE) == 32 {
+		copy(update.shareHashLE[:], shareHashLE)
+		update.hasShareHash = true
 	}
 
 	select {
@@ -1117,7 +1124,10 @@ func (mc *MinerConn) recordShareSync(update statsUpdate) {
 	}
 	mc.stats.LastShare = update.timestamp
 
-	mc.lastShareHash = update.shareHash
+	if update.hasShareHash {
+		mc.lastShareHashLE = update.shareHashLE
+		mc.lastShareHashSet = true
+	}
 	mc.lastShareAccepted = update.accepted
 	mc.lastShareDifficulty = update.shareDiff
 	mc.lastShareDetail = update.detail
@@ -1127,11 +1137,14 @@ func (mc *MinerConn) recordShareSync(update statsUpdate) {
 	mc.statsMu.Unlock()
 }
 
-func (mc *MinerConn) trackBestShare(worker, hash string, difficulty float64, now time.Time) {
-	if mc.metrics == nil {
+func (mc *MinerConn) trackBestShare(worker string, hashLE []byte, difficulty float64, now time.Time) {
+	if mc.metrics == nil || len(hashLE) != 32 {
 		return
 	}
-	mc.metrics.TrackBestShare(worker, hash, difficulty, now)
+	if !mc.metrics.ShouldTrackBestShare(difficulty) {
+		return
+	}
+	mc.metrics.TrackBestShare(worker, hex.EncodeToString(hashLE), difficulty, now)
 }
 
 func (mc *MinerConn) snapshotStats() MinerStats {
@@ -1153,10 +1166,14 @@ type minerShareSnapshot struct {
 func (mc *MinerConn) snapshotShareInfo() minerShareSnapshot {
 	mc.statsMu.Lock()
 	defer mc.statsMu.Unlock()
+	lastHash := ""
+	if mc.lastShareHashSet {
+		lastHash = hex.EncodeToString(mc.lastShareHashLE[:])
+	}
 	return minerShareSnapshot{
 		Stats:               mc.stats,
 		RollingHashrate:     mc.rollingHashrateValue,
-		LastShareHash:       mc.lastShareHash,
+		LastShareHash:       lastHash,
 		LastShareAccepted:   mc.lastShareAccepted,
 		LastShareDifficulty: mc.lastShareDifficulty,
 		LastShareDetail:     mc.lastShareDetail,
@@ -1170,14 +1187,14 @@ func (mc *MinerConn) isBanned(now time.Time) bool {
 	return now.Before(mc.banUntil)
 }
 
-func (mc *MinerConn) banDetails() (time.Time, string, int) {
+func (mc *MinerConn) banDetails() (time.Time, string) {
 	mc.stateMu.Lock()
 	defer mc.stateMu.Unlock()
-	return mc.banUntil, mc.banReason, mc.invalidSubs
+	return mc.banUntil, mc.banReason
 }
 
 func (mc *MinerConn) logBan(reason, worker string, invalidSubs int) {
-	until, banReason, _ := mc.banDetails()
+	until, banReason := mc.banDetails()
 	if banReason == "" {
 		banReason = reason
 	}
